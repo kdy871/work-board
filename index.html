@@ -8,6 +8,15 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Lucide Icons CDN -->
     <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Firebase SDK (공동 저장소용) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // 전역 설정 노출
+        window.firebaseCore = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, setDoc, onSnapshot };
+    </script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
         body { font-family: 'Inter', sans-serif; }
@@ -22,23 +31,19 @@
         <!-- Header 섹션 -->
         <div class="max-w-5xl mx-auto mb-6">
             <div class="flex items-center gap-4">
-                <!-- 뒤로가기 버튼 -->
                 <button id="back-button" onclick="setView('dashboard')" class="hidden p-2 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-all shadow-sm">
                     <i data-lucide="arrow-left" class="w-6 h-6 text-slate-600"></i>
                 </button>
                 <div class="flex items-center gap-3">
-                    <!-- 회사 로고 박스 (클릭 시 새로고침 실행, 검색 페이지와 동일한 스타일 적용) -->
                     <div id="header-icon" onclick="location.reload()" class="w-12 h-12 bg-white border border-indigo-200 rounded-2xl flex items-center justify-center shadow-sm transition-all overflow-hidden cursor-pointer hover:opacity-80 active:scale-95 ring-4 ring-indigo-50">
                         <span id="logo-placeholder" class="font-black text-blue-600">1P</span>
                     </div>
-                    <!-- 숨겨진 파일 입력 필드 -->
                     <input type="file" id="logo-input" class="hidden" accept="image/*" onchange="handleLogoChange(event)">
                     
                     <div>
                         <h1 class="text-2xl font-black tracking-tight text-slate-900 leading-none">
                             <span id="page-title">작업지시서 실시간 보드</span>
                         </h1>
-                        <!-- 부서명 및 이미지 변경 버튼 영역 -->
                         <div class="flex items-center gap-2 mt-1.5 ml-0.5">
                             <p class="text-slate-400 text-[10px] font-bold tracking-tight uppercase">원프랜트 터빈전기과</p>
                             <button onclick="triggerLogoUpload()" class="text-blue-500 hover:text-blue-700 text-[10px] font-extrabold transition-colors cursor-pointer bg-blue-50 px-1.5 py-0.5 rounded shadow-sm">
@@ -49,10 +54,8 @@
                 </div>
             </div>
 
-            <!-- 1. 대시보드 뷰 (2x2 그리드) -->
             <div id="dashboard-view" class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-6"></div>
 
-            <!-- 2. 통합 현황/검색 뷰 -->
             <div id="integrated-view" class="hidden mt-6">
                 <div class="relative w-full">
                     <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-5 h-5"></i>
@@ -62,7 +65,7 @@
                 <div class="mt-3 flex items-center justify-between px-1">
                     <div class="flex items-center gap-2 text-slate-400 text-[11px] font-medium">
                         <i data-lucide="info" class="w-3 h-3"></i>
-                        <span>완료된 작업을 포함한 전체 현황을 검색합니다.</span>
+                        <span>긴급(최우선) → 미완료(마감순) → 완료(최신순) 정렬</span>
                     </div>
                     <div id="data-status-badge" class="text-[10px] font-bold bg-slate-200 text-slate-500 px-2 py-0.5 rounded-full">
                         데이터 로드 중...
@@ -71,7 +74,6 @@
             </div>
         </div>
 
-        <!-- 메인 데이터 리스트 영역 -->
         <div class="max-w-5xl mx-auto">
             <div id="list-header" class="mb-4 flex items-center justify-between px-1">
                 <h2 id="list-title" class="text-sm font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
@@ -104,28 +106,67 @@
         </div>
     </div>
 
-    <script>
+    <script type="module">
         const GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzVnX2HxVYY8o5_LEnSutmDARCMMGsTq_lWI58pPjybRjVzdOVOdcpNzquUMlb8JSjJag/exec"; 
         const SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1Dh4-ZV7K_1PjFZtXGHfFBebwIYeWCdOkffF0O8Pw-MA/edit#gid=0"; 
+
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        
+        const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, setDoc, onSnapshot } = window.firebaseCore;
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
 
         let allTasks = [];
         let searchQuery = '';
         let currentView = 'dashboard';
         let dashboardFilter = 'pending'; 
+        let currentUser = null;
 
-        // [로고 관련 자바스크립트 함수]
-        function triggerLogoUpload() {
+        function initLogoSync() {
+            if (!currentUser) return;
+            const logoDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+            onSnapshot(logoDocRef, (docSnap) => {
+                if (docSnap.exists() && docSnap.data().logoUrl) {
+                    updateLogoUI(docSnap.data().logoUrl);
+                } else {
+                    updateLogoUI(null);
+                }
+            }, (error) => console.error("Logo Sync Error:", error));
+        }
+
+        async function saveLogoToCloud(base64Image) {
+            if (!currentUser) return;
+            try {
+                const logoDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+                await setDoc(logoDocRef, { logoUrl: base64Image }, { merge: true });
+            } catch (error) {
+                console.error("Logo Save Error:", error);
+            }
+        }
+
+        window.triggerLogoUpload = function() {
             document.getElementById('logo-input').click();
         }
 
-        function handleLogoChange(event) {
+        window.handleLogoChange = function(event) {
             const file = event.target.files[0];
             if (file) {
+                if (file.size > 800000) {
+                    const modal = document.createElement('div');
+                    modal.className = "fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4";
+                    modal.innerHTML = `<div class="bg-white p-6 rounded-2xl max-w-sm w-full text-center shadow-2xl">
+                        <p class="font-bold mb-4 text-slate-800">이미지 용량이 너무 큽니다.<br><span class="text-sm font-normal text-slate-500">(800KB 이하의 파일을 선택해주세요)</span></p>
+                        <button onclick="this.parentElement.parentElement.remove()" class="bg-indigo-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-indigo-700 transition-colors">확인</button>
+                    </div>`;
+                    document.body.appendChild(modal);
+                    return;
+                }
                 const reader = new FileReader();
-                reader.onload = function(e) {
+                reader.onload = async function(e) {
                     const base64Image = e.target.result;
-                    localStorage.setItem('custom-logo-oneplant', base64Image);
-                    updateLogoUI(base64Image);
+                    await saveLogoToCloud(base64Image);
                 };
                 reader.readAsDataURL(file);
             }
@@ -138,11 +179,6 @@
             } else {
                 headerIcon.innerHTML = `<span class="font-black text-blue-600">1P</span>`;
             }
-        }
-
-        function initLogo() {
-            const savedLogo = localStorage.getItem('custom-logo-oneplant');
-            updateLogoUI(savedLogo);
         }
 
         async function fetchData() {
@@ -160,43 +196,62 @@
                 const data = await response.json();
                 if (data.error) throw new Error(data.error);
                 
-                allTasks = Array.isArray(data) ? data : [];
-                allTasks.sort((a, b) => {
+                let rawData = Array.isArray(data) ? data : [];
+                
+                // [개선된 정렬 로직] 
+                rawData.sort((a, b) => {
+                    // 1순위: 긴급(isUrgent) 여부
+                    if (a.isUrgent !== b.isUrgent) return a.isUrgent ? -1 : 1;
+
+                    // 2순위: 미완료 여부
+                    const aPending = a.status.includes("미완료");
+                    const bPending = b.status.includes("미완료");
+                    if (aPending !== bPending) return aPending ? -1 : 1;
+
+                    // 3순위: 날짜 기준 정렬
+                    if (a.deadline === b.deadline) return 0;
                     if (a.deadline === "기한없음") return 1;
                     if (b.deadline === "기한없음") return -1;
-                    return new Date(b.deadline) - new Date(a.deadline);
+
+                    const dateA = new Date(a.deadline);
+                    const dateB = new Date(b.deadline);
+
+                    if (aPending) {
+                        // 미완료 상태: 마감 임박 순 (날짜 오름차순)
+                        return dateA - dateB;
+                    } else {
+                        // 완료 상태: 최신 입력/마감 날짜 순 (날짜 내림차순)
+                        return dateB - dateA;
+                    }
                 });
-                
+
+                allTasks = rawData;
                 if (badge) badge.innerText = `데이터 로드 완료: ${allTasks.length}건`;
                 renderApp();
             } catch (err) {
-                showError("데이터 연동에 실패했습니다. 시트 스크립트 배포를 확인해 주세요.");
+                showError("데이터 연동에 실패했습니다.");
             } finally {
                 loader.classList.add('hidden');
             }
         }
 
-        function handleSearch() {
+        window.handleSearch = function() {
             searchQuery = document.getElementById('search-input').value.trim().toLowerCase();
             renderApp();
         }
 
-        function setDashboardFilter(type) {
+        window.setDashboardFilter = function(type) {
             dashboardFilter = type;
             renderApp();
         }
 
-        function setView(view) {
+        window.setView = function(view) {
             currentView = view;
             const dashboardEl = document.getElementById('dashboard-view');
             const integratedEl = document.getElementById('integrated-view');
             const backBtn = document.getElementById('back-button');
             const listHeader = document.getElementById('list-header');
             const pageTitle = document.getElementById('page-title');
-            const headerIcon = document.getElementById('header-icon');
-
-            // 공통 로고 초기화 실행
-            initLogo();
 
             if (view === 'dashboard') {
                 dashboardEl.classList.remove('hidden');
@@ -204,9 +259,6 @@
                 backBtn.classList.add('hidden');
                 listHeader.classList.remove('hidden');
                 pageTitle.innerText = "작업지시서 실시간 보드";
-                
-                // 검색 페이지와 동일한 스타일(테두리 + 글로우) 적용
-                headerIcon.className = "w-12 h-12 bg-white border border-indigo-200 rounded-2xl flex items-center justify-center shadow-sm transition-all overflow-hidden cursor-pointer hover:opacity-80 active:scale-95 ring-4 ring-indigo-50";
                 searchQuery = '';
             } else {
                 dashboardEl.classList.add('hidden');
@@ -214,10 +266,6 @@
                 backBtn.classList.remove('hidden');
                 listHeader.classList.add('hidden');
                 pageTitle.innerText = "통합 작업지시서 현황";
-                
-                // 검색 화면 스타일 유지
-                headerIcon.className = "w-12 h-12 bg-white border border-indigo-200 rounded-2xl flex items-center justify-center shadow-sm transition-all overflow-hidden cursor-pointer hover:opacity-80 active:scale-95 ring-4 ring-indigo-50";
-                
                 setTimeout(() => document.getElementById('search-input').focus(), 100);
             }
             lucide.createIcons();
@@ -262,7 +310,7 @@
                 filtered.forEach(task => {
                     const isCompleted = task.status.includes("완료") && !task.status.includes("미완료");
                     const card = document.createElement('div');
-                    card.className = `bg-white border transition-all hover:shadow-md p-4 rounded-xl relative overflow-hidden group flex flex-col md:flex-row md:items-center justify-between gap-4 ${isCompleted ? 'border-emerald-100 bg-emerald-50/20' : (task.isUrgent ? 'border-red-100 shadow-sm shadow-red-50' : 'border-slate-100')}`;
+                    card.className = `bg-white border transition-all hover:shadow-md p-4 rounded-xl relative overflow-hidden group flex flex-col md:flex-row md:items-center justify-between gap-4 ${isCompleted ? 'border-emerald-100 bg-emerald-50/10' : (task.isUrgent ? 'border-red-100 shadow-sm shadow-red-50' : 'border-slate-100')}`;
                     
                     card.innerHTML = `
                         <div class="flex-1 flex flex-col md:flex-row md:items-center gap-3 md:gap-6">
@@ -274,7 +322,7 @@
                             </div>
                             <div class="flex-1 min-w-0">
                                 <p class="text-[9px] font-bold text-slate-400 mb-0.5 tracking-tight">오더: ${task.orderNo || '-'}</p>
-                                <h3 class="font-bold text-slate-900 text-sm md:text-base group-hover:text-blue-600 transition-colors truncate">${task.title}</h3>
+                                <h3 class="font-bold text-slate-900 text-sm md:text-base group-hover:text-blue-600 transition-colors truncate ${isCompleted ? 'opacity-60' : ''}">${task.title}</h3>
                             </div>
                         </div>
                         <div class="flex items-center justify-between md:justify-end gap-6 shrink-0 border-t md:border-t-0 pt-3 md:pt-0 mt-1 md:mt-0">
@@ -326,10 +374,28 @@
             document.getElementById('task-grid').classList.add('hidden');
         }
 
-        window.onload = function() {
-            initLogo();
-            fetchData();
+        const init = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    currentUser = user;
+                    if (user) {
+                        initLogoSync();
+                        fetchData();
+                    }
+                });
+            } catch (error) {
+                console.error("Initialization Error:", error);
+                fetchData();
+            }
         };
+
+        init();
     </script>
 </body>
 </html>
