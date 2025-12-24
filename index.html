@@ -110,40 +110,62 @@
         const GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzVnX2HxVYY8o5_LEnSutmDARCMMGsTq_lWI58pPjybRjVzdOVOdcpNzquUMlb8JSjJag/exec"; 
         const SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1Dh4-ZV7K_1PjFZtXGHfFBebwIYeWCdOkffF0O8Pw-MA/edit#gid=0"; 
 
-        const firebaseConfig = JSON.parse(__firebase_config);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        // Firebase 설정 처리
+        let firebaseConfig = null;
+        try {
+            firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        } catch (e) {}
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'work-order-app';
         
         const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, setDoc, onSnapshot } = window.firebaseCore;
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-
+        
+        let app, auth, db;
         let allTasks = [];
         let searchQuery = '';
         let currentView = 'dashboard';
         let dashboardFilter = 'pending'; 
         let currentUser = null;
 
+        // Firebase 초기화 시도
+        const setupFirebase = () => {
+            if (firebaseConfig && firebaseConfig.apiKey) {
+                try {
+                    app = initializeApp(firebaseConfig);
+                    auth = getAuth(app);
+                    db = getFirestore(app);
+                    return true;
+                } catch (err) {
+                    console.error("Firebase Init Failed:", err);
+                }
+            }
+            return false;
+        };
+
         function initLogoSync() {
-            if (!currentUser) return;
+            // 로컬 스토리지 우선 로드
+            const localLogo = localStorage.getItem('app-logo-fallback');
+            if (localLogo) updateLogoUI(localLogo);
+
+            if (!currentUser || !db) return;
             const logoDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
             onSnapshot(logoDocRef, (docSnap) => {
                 if (docSnap.exists() && docSnap.data().logoUrl) {
                     updateLogoUI(docSnap.data().logoUrl);
-                } else {
-                    updateLogoUI(null);
                 }
-            }, (error) => console.error("Logo Sync Error:", error));
+            }, (error) => {});
         }
 
         async function saveLogoToCloud(base64Image) {
-            if (!currentUser) return;
+            // 로컬 스토리지 저장 (백업)
+            localStorage.setItem('app-logo-fallback', base64Image);
+            updateLogoUI(base64Image);
+
+            if (!currentUser || !db) return;
             try {
                 const logoDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
                 await setDoc(logoDocRef, { logoUrl: base64Image }, { merge: true });
-            } catch (error) {
-                console.error("Logo Save Error:", error);
-            }
+            } catch (error) {}
         }
 
         window.triggerLogoUpload = function() {
@@ -154,13 +176,7 @@
             const file = event.target.files[0];
             if (file) {
                 if (file.size > 800000) {
-                    const modal = document.createElement('div');
-                    modal.className = "fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4";
-                    modal.innerHTML = `<div class="bg-white p-6 rounded-2xl max-w-sm w-full text-center shadow-2xl">
-                        <p class="font-bold mb-4 text-slate-800">이미지 용량이 너무 큽니다.<br><span class="text-sm font-normal text-slate-500">(800KB 이하의 파일을 선택해주세요)</span></p>
-                        <button onclick="this.parentElement.parentElement.remove()" class="bg-indigo-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-indigo-700 transition-colors">확인</button>
-                    </div>`;
-                    document.body.appendChild(modal);
+                    alert("이미지 용량이 너무 큽니다. (800KB 이하 권장)");
                     return;
                 }
                 const reader = new FileReader();
@@ -198,38 +214,24 @@
                 
                 let rawData = Array.isArray(data) ? data : [];
                 
-                // [개선된 정렬 로직] 
                 rawData.sort((a, b) => {
-                    // 1순위: 긴급(isUrgent) 여부
                     if (a.isUrgent !== b.isUrgent) return a.isUrgent ? -1 : 1;
-
-                    // 2순위: 미완료 여부
                     const aPending = a.status.includes("미완료");
                     const bPending = b.status.includes("미완료");
                     if (aPending !== bPending) return aPending ? -1 : 1;
-
-                    // 3순위: 날짜 기준 정렬
                     if (a.deadline === b.deadline) return 0;
                     if (a.deadline === "기한없음") return 1;
                     if (b.deadline === "기한없음") return -1;
-
                     const dateA = new Date(a.deadline);
                     const dateB = new Date(b.deadline);
-
-                    if (aPending) {
-                        // 미완료 상태: 마감 임박 순 (날짜 오름차순)
-                        return dateA - dateB;
-                    } else {
-                        // 완료 상태: 최신 입력/마감 날짜 순 (날짜 내림차순)
-                        return dateB - dateA;
-                    }
+                    return aPending ? dateA - dateB : dateB - dateA;
                 });
 
                 allTasks = rawData;
                 if (badge) badge.innerText = `데이터 로드 완료: ${allTasks.length}건`;
                 renderApp();
             } catch (err) {
-                showError("데이터 연동에 실패했습니다.");
+                showError("데이터를 불러올 수 없습니다. 시트 설정을 확인해주세요.");
             } finally {
                 loader.classList.add('hidden');
             }
@@ -374,28 +376,30 @@
             document.getElementById('task-grid').classList.add('hidden');
         }
 
-        const init = async () => {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
+        const startApp = async () => {
+            // 로컬 로고 우선 불러오기
+            initLogoSync();
+            
+            // Firebase 설정 시도
+            if (setupFirebase()) {
+                try {
+                    const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                    if (token) await signInWithCustomToken(auth, token);
+                    else await signInAnonymously(auth);
 
-                onAuthStateChanged(auth, (user) => {
-                    currentUser = user;
-                    if (user) {
-                        initLogoSync();
-                        fetchData();
-                    }
-                });
-            } catch (error) {
-                console.error("Initialization Error:", error);
-                fetchData();
+                    onAuthStateChanged(auth, (user) => {
+                        currentUser = user;
+                        if (user) initLogoSync();
+                    });
+                } catch (error) {}
             }
+
+            // 구글 시트 데이터 로드는 항상 실행
+            fetchData();
+            lucide.createIcons();
         };
 
-        init();
+        window.onload = startApp;
     </script>
 </body>
 </html>
